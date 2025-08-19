@@ -49,7 +49,7 @@ func TestSendNotificationToURLEncodedSubscription(t *testing.T) {
 
 	if resp.StatusCode != 201 {
 		t.Fatalf(
-			"Incorreect status code, expected=%d, got=%d",
+			"Incorrect status code, expected=%d, got=%d",
 			resp.StatusCode,
 			201,
 		)
@@ -71,7 +71,7 @@ func TestSendNotificationToStandardEncodedSubscription(t *testing.T) {
 
 	if resp.StatusCode != 201 {
 		t.Fatalf(
-			"Incorreect status code, expected=%d, got=%d",
+			"Incorrect status code, expected=%d, got=%d",
 			resp.StatusCode,
 			201,
 		)
