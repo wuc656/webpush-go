@@ -40,8 +40,8 @@ func TestSendNotificationToURLEncodedSubscription(t *testing.T) {
 		Topic:           "test_topic",
 		TTL:             0,
 		Urgency:         "low",
-		VAPIDPublicKey:  "test-public",
-		VAPIDPrivateKey: "test-private",
+		VAPIDPublicKey:  "BNNL5ZaTfK81qhXOx23-wewhigUeFb632jN6LvRWCFH1ubQr77FE_9qV1FuojuRmHP42zmf34rXgW80OvUVDgTk",
+		VAPIDPrivateKey: "zqbxT6JKstKSY9JKibZLSQ",
 	})
 	if err != nil {
 		t.Fatal(err)
