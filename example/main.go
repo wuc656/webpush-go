@@ -2,8 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 
-	webpush "github.com/SherClockHolmes/webpush-go"
+	webpush "github.com/wuc656/webpush-go"
 )
 
 const (
@@ -25,7 +26,9 @@ func main() {
 		TTL:             30,
 	})
 	if err != nil {
-		// TODO: Handle error
+		log.Printf("Failed to send notification: %v", err)
 	}
-	defer resp.Body.Close()
+	if resp != nil {
+		defer resp.Body.Close()
+	}
 }
