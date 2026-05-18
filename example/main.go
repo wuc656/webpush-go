@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -28,7 +27,6 @@ type SendNotificationRequest struct {
 	AuthScheme   webpush.AuthScheme   `json:"authScheme"`
 }
 
-
 func main() {
 	// Check for VAPID keys file
 	_, err := os.Stat("vapid_keys.json")
@@ -50,13 +48,15 @@ func main() {
 			log.Fatalf("Failed to marshal keys to JSON: %v", err)
 		}
 
-		if err := ioutil.WriteFile("vapid_keys.json", jsonBytes, 0600); err != nil {
+		if err := os.WriteFile("vapid_keys.json", jsonBytes, 0600); err != nil {
 			log.Fatalf("Failed to save keys file: %v", err)
 		}
 		log.Println("New VAPID keys generated and saved.")
+	} else if err != nil {
+		log.Fatalf("Failed to check keys file: %v", err)
 	} else {
 		log.Println("Loading VAPID keys from file...")
-		jsonBytes, err := ioutil.ReadFile("vapid_keys.json")
+		jsonBytes, err := os.ReadFile("vapid_keys.json")
 		if err != nil {
 			log.Fatalf("Failed to read keys file: %v", err)
 		}
@@ -71,25 +71,25 @@ func main() {
 	}
 
 	http.HandleFunc("/vapid_public_key", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(vapidPublicKey))
+		if _, err := w.Write([]byte(vapidPublicKey)); err != nil {
+			log.Printf("Error writing VAPID public key: %v", err)
+		}
 	})
 
 	http.HandleFunc("/send_notification", func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
-		body, err := ioutil.ReadAll(r.Body)
-		if err != nil {
-			log.Printf("Error reading body: %v", err)
-			http.Error(w, "Error reading body", http.StatusInternalServerError)
-			return
-		}
+		defer func() {
+			if err := r.Body.Close(); err != nil {
+				log.Printf("Error closing request body: %v", err)
+			}
+		}()
 
 		var req SendNotificationRequest
-		if err := json.Unmarshal(body, &req); err != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			log.Printf("Error unmarshalling request: %v", err)
 			http.Error(w, "Error unmarshalling request", http.StatusBadRequest)
 			return
 		}
-		
+
 		// Send Notification
 		resp, err := webpush.SendNotification([]byte("Test"), &req.Subscription, &webpush.Options{
 			AuthScheme:      req.AuthScheme,
@@ -104,10 +104,16 @@ func main() {
 			return
 		}
 
-		defer resp.Body.Close()
+		defer func() {
+			if err := resp.Body.Close(); err != nil {
+				log.Printf("Error closing response body: %v", err)
+			}
+		}()
 
 		// Print status code
-		fmt.Fprintf(w, "Status: %d", resp.StatusCode)
+		if _, err := fmt.Fprintf(w, "Status: %d", resp.StatusCode); err != nil {
+			log.Printf("Error writing response: %v", err)
+		}
 	})
 
 	http.Handle("/", http.FileServer(http.Dir(".")))

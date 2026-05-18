@@ -5,19 +5,16 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/elliptic"
+	"crypto/ecdh"
+	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
-	"io"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
-
-	"golang.org/x/crypto/hkdf"
 )
 
 const MaxRecordSize uint32 = 4096
@@ -27,7 +24,7 @@ var ErrMaxPadExceeded = errors.New("payload has exceeded the maximum length")
 // saltFunc generates a salt of 16 bytes
 var saltFunc = func() ([]byte, error) {
 	salt := make([]byte, 16)
-	_, err := io.ReadFull(rand.Reader, salt)
+	_, err := rand.Read(salt)
 	if err != nil {
 		return salt, err
 	}
@@ -94,56 +91,48 @@ func SendNotificationWithContext(ctx context.Context, message []byte, s *Subscri
 	}
 
 	// Create the ecdh_secret shared key pair
-	curve := elliptic.P256()
+	curve := ecdh.P256()
 
 	// Application server key pairs (single use)
-	localPrivateKey, x, y, err := elliptic.GenerateKey(curve, rand.Reader)
+	localPrivateKey, err := curve.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
 	}
-
-	localPublicKey := elliptic.Marshal(curve, x, y)
+	localPublicKey := localPrivateKey.PublicKey().Bytes()
 
 	// Combine application keys with receiver's EC public key
-	sharedX, sharedY := elliptic.Unmarshal(curve, dh)
-	if sharedX == nil {
+	remotePublicKey, err := curve.NewPublicKey(dh)
+	if err != nil {
 		return nil, errors.New("unmarshal error: public key is not a valid point on the curve")
 	}
 
 	// Derive ECDH shared secret
-	sx, sy := curve.ScalarMult(sharedX, sharedY, localPrivateKey)
-	if !curve.IsOnCurve(sx, sy) {
+	sharedECDHSecret, err := localPrivateKey.ECDH(remotePublicKey)
+	if err != nil {
 		return nil, errors.New("encryption error: ECDH shared secret isn't on curve")
 	}
-	mlen := curve.Params().BitSize / 8
-	sharedECDHSecret := make([]byte, mlen)
-	sx.FillBytes(sharedECDHSecret)
 
 	hash := sha256.New
 
 	// ikm
-	prkInfoBuf := bytes.NewBuffer([]byte("WebPush: info\x00"))
-	prkInfoBuf.Write(dh)
-	prkInfoBuf.Write(localPublicKey)
+	prkInfo := make([]byte, 0, len("WebPush: info\x00")+len(dh)+len(localPublicKey))
+	prkInfo = append(prkInfo, "WebPush: info\x00"...)
+	prkInfo = append(prkInfo, dh...)
+	prkInfo = append(prkInfo, localPublicKey...)
 
-	prkHKDF := hkdf.New(hash, sharedECDHSecret, authSecret, prkInfoBuf.Bytes())
-	ikm, err := getHKDFKey(prkHKDF, 32)
+	ikm, err := hkdf.Key(hash, sharedECDHSecret, authSecret, string(prkInfo), 32)
 	if err != nil {
 		return nil, err
 	}
 
 	// Derive Content Encryption Key
-	contentEncryptionKeyInfo := []byte("Content-Encoding: aes128gcm\x00")
-	contentHKDF := hkdf.New(hash, ikm, salt, contentEncryptionKeyInfo)
-	contentEncryptionKey, err := getHKDFKey(contentHKDF, 16)
+	contentEncryptionKey, err := hkdf.Key(hash, ikm, salt, "Content-Encoding: aes128gcm\x00", 16)
 	if err != nil {
 		return nil, err
 	}
 
 	// Derive the Nonce
-	nonceInfo := []byte("Content-Encoding: nonce\x00")
-	nonceHKDF := hkdf.New(hash, ikm, salt, nonceInfo)
-	nonce, err := getHKDFKey(nonceHKDF, 12)
+	nonce, err := hkdf.Key(hash, ikm, salt, "Content-Encoding: nonce\x00", 12)
 	if err != nil {
 		return nil, err
 	}
@@ -168,39 +157,41 @@ func SendNotificationWithContext(ctx context.Context, message []byte, s *Subscri
 	recordLength := int(recordSize) - 16
 
 	// Encryption Content-Coding Header
-	recordBuf := bytes.NewBuffer(salt)
+	record := make([]byte, 0, int(recordSize))
+	record = append(record, salt...)
 
-	rs := make([]byte, 4)
-	binary.BigEndian.PutUint32(rs, recordSize)
+	var rs [4]byte
+	binary.BigEndian.PutUint32(rs[:], recordSize)
 
-	recordBuf.Write(rs)
-	recordBuf.Write([]byte{byte(len(localPublicKey))})
-	recordBuf.Write(localPublicKey)
+	record = append(record, rs[:]...)
+	record = append(record, byte(len(localPublicKey)))
+	record = append(record, localPublicKey...)
 
 	// Avoid data races by copying the message data
-	messageCopy := make([]byte, len(message))
-	copy(messageCopy, message)
-	dataBuf := bytes.NewBuffer(messageCopy)
-	
-	// Pad content to max record size - 16 - header
-	// Padding ending delimeter
-	dataBuf.Write([]byte("\x02"))
-	if err := pad(dataBuf, recordLength-recordBuf.Len()); err != nil {
-		return nil, err
+	maxPayloadLen := recordLength - len(record)
+	payloadLen := len(message) + 1
+	if payloadLen > maxPayloadLen {
+		return nil, ErrMaxPadExceeded
 	}
+
+	data := make([]byte, maxPayloadLen)
+	copy(data, message)
+
+	// Pad content to max record size - 16 - header
+	// Padding ending delimiter
+	data[len(message)] = 0x02
 
 	// Compose the ciphertext
-	ciphertext := gcm.Seal([]byte{}, nonce, dataBuf.Bytes(), nil)
-	recordBuf.Write(ciphertext)
+	record = gcm.Seal(record, nonce, data, nil)
 
 	// POST request
-	req, err := http.NewRequest("POST", s.Endpoint, recordBuf)
-	if err != nil {
-		return nil, err
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
-	if ctx != nil {
-		req = req.WithContext(ctx)
+	req, err := http.NewRequestWithContext(ctx, "POST", s.Endpoint, bytes.NewReader(record))
+	if err != nil {
+		return nil, err
 	}
 
 	req.Header.Set("Content-Encoding", "aes128gcm")
@@ -253,40 +244,19 @@ func SendNotificationWithContext(ctx context.Context, message []byte, s *Subscri
 // if necessary, add "=" padding to the key for URL decode
 func decodeSubscriptionKey(key string) ([]byte, error) {
 	// "=" padding
-	buf := bytes.NewBufferString(key)
-	if rem := len(key) % 4; rem != 0 {
-		buf.WriteString(strings.Repeat("=", 4-rem))
+	switch rem := len(key) % 4; rem {
+	case 1:
+		key += "==="
+	case 2:
+		key += "=="
+	case 3:
+		key += "="
 	}
 
-	bytes, err := base64.StdEncoding.DecodeString(buf.String())
+	bytes, err := base64.StdEncoding.DecodeString(key)
 	if err == nil {
 		return bytes, nil
 	}
 
-	return base64.URLEncoding.DecodeString(buf.String())
-}
-
-// Returns a key of length "length" given an hkdf function
-func getHKDFKey(hkdf io.Reader, length int) ([]byte, error) {
-	key := make([]byte, length)
-	n, err := io.ReadFull(hkdf, key)
-	if n != len(key) || err != nil {
-		return key, err
-	}
-
-	return key, nil
-}
-
-func pad(payload *bytes.Buffer, maxPadLen int) error {
-	payloadLen := payload.Len()
-	if payloadLen > maxPadLen {
-		return ErrMaxPadExceeded
-	}
-
-	padLen := maxPadLen - payloadLen
-
-	padding := make([]byte, padLen)
-	payload.Write(padding)
-
-	return nil
+	return base64.URLEncoding.DecodeString(key)
 }

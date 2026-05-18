@@ -1,6 +1,7 @@
 package webpush
 
 import (
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -23,22 +24,19 @@ const (
 	WebPush AuthScheme = "webpush"
 )
 
-
 // GenerateVAPIDKeys will create a private and public VAPID key pair
 func GenerateVAPIDKeys() (privateKey, publicKey string, err error) {
 	// Get the private key from the P256 curve
-	curve := elliptic.P256()
-
-	private, x, y, err := elliptic.GenerateKey(curve, rand.Reader)
+	private, err := ecdh.P256().GenerateKey(rand.Reader)
 	if err != nil {
 		return
 	}
 
-	public := elliptic.Marshal(curve, x, y)
+	public := private.PublicKey().Bytes()
 
 	// Convert to base64
 	publicKey = base64.RawURLEncoding.EncodeToString(public)
-	privateKey = base64.RawURLEncoding.EncodeToString(private)
+	privateKey = base64.RawURLEncoding.EncodeToString(private.Bytes())
 
 	return
 }
@@ -47,11 +45,7 @@ func GenerateVAPIDKeys() (privateKey, publicKey string, err error) {
 func generateVAPIDHeaderKeys(privateKey []byte) *ecdsa.PrivateKey {
 	// Public key
 	curve := elliptic.P256()
-	px, py := curve.ScalarMult(
-		curve.Params().Gx,
-		curve.Params().Gy,
-		privateKey,
-	)
+	px, py := curve.ScalarBaseMult(privateKey)
 
 	pubKey := ecdsa.PublicKey{
 		Curve: curve,
@@ -110,7 +104,7 @@ func generateVAPIDHeaders(
 		return nil, err
 	}
 
-	headers := make(map[string]string)
+	headers := make(map[string]string, 2)
 
 	switch authScheme {
 	case WebPush:
@@ -130,9 +124,8 @@ func generateVAPIDHeaders(
 // Need to decode the vapid private key in multiple base64 formats
 // Solution from: https://github.com/SherClockHolmes/webpush-go/issues/29
 func decodeVapidKey(key string) ([]byte, error) {
-	bytes, err := base64.URLEncoding.DecodeString(key)
-	if err == nil {
-		return bytes, nil
+	if strings.Contains(key, "=") {
+		return base64.URLEncoding.DecodeString(key)
 	}
 
 	return base64.RawURLEncoding.DecodeString(key)
